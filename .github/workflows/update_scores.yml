@@ -11,101 +11,125 @@ permissions:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js & Playwright
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Fetch API and Generate Database
+      - name: Install Dependencies
+        run: |
+          npm init -y
+          npm install playwright
+          npx playwright install --with-deps chromium
+
+      - name: Fetch Authenticated API and Generate Database
         run: |
           node -e '
+          const { chromium } = require("playwright");
           const fs = require("fs");
 
           (async () => {
-            console.log("[1/3] Connessione alle API di AscensionLogs...");
-            
-            const headers = {
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-              "Accept": "application/json, text/plain, */*",
-              "Referer": "https://coa.ascensionlogs.gg/rankings/mythic-plus"
-            };
+            console.log("[1/3] Avvio browser per stabilire la sessione autorizzata...");
+            const browser = await chromium.launch({
+              headless: true,
+              args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+            });
 
-            // Scarica pagina 1 per ottenere il totale esatto dei record
-            const firstRes = await fetch("https://coa.ascensionlogs.gg/api/rankings/mythic-plus/characters?realm=_all&bests=1&page=1&limit=100", { headers });
-            if (!firstRes.ok) throw new Error("Errore chiamata API iniziale: " + firstRes.status);
-            
-            const firstData = await firstRes.json();
-            const totalRecords = firstData.total || 10430;
-            const totalPages = Math.ceil(totalRecords / 100);
-            
-            console.log(`[OK] Trovati ${totalRecords} giocatori totali distribuiti su ${totalPages} pagine.`);
-            console.log("[2/3] Download di tutte le pagine...");
+            const context = await browser.newContext({
+              userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            });
 
-            let database = {};
-            let totalPlayers = 0;
+            const page = await context.newPage();
 
-            function processRows(rows) {
-              if (!rows || !Array.isArray(rows)) return;
-              for (const row of rows) {
-                const name = row.display_name;
-                const realm = row.realm || "Vol\x27Jin";
-                const score = parseFloat(row.score || 0);
-                const maxKey = parseInt(row.best_level || 0);
+            // Blocca solo annunci per velocizzare il caricamento della pagina iniziale
+            await page.route("**/*", route => {
+              const url = route.request().url();
+              if (url.includes("google") || url.includes("adthrive") || url.includes("criteo")) {
+                return route.abort();
+              }
+              return route.continue();
+            });
 
-                if (name && score > 0) {
-                  if (!database[realm]) database[realm] = {};
-                  if (!database[realm][name] || database[realm][name].score < score) {
-                    database[realm][name] = { score, maxKey };
-                    totalPlayers++;
+            await page.goto("https://coa.ascensionlogs.gg/rankings/mythic-plus?realm=_all", { waitUntil: "domcontentloaded", timeout: 60000 });
+            await page.waitForTimeout(2000);
+
+            console.log("[2/3] Download di tutte le pagine API tramite sessione attiva...");
+
+            // Esegue i fetch all interno del contesto browser autenticato
+            const allPlayers = await page.evaluate(async () => {
+              let database = {};
+
+              // Scarica la prima pagina per conoscere il totale esatto
+              const firstRes = await fetch("https://coa.ascensionlogs.gg/api/rankings/mythic-plus/characters?realm=_all&bests=1&page=1&limit=100");
+              if (!firstRes.ok) throw new Error("Errore API sessione: " + firstRes.status);
+              
+              const firstData = await firstRes.json();
+              const totalRecords = firstData.total || 10430;
+              const totalPages = Math.ceil(totalRecords / 100);
+
+              function saveRows(rows) {
+                if (!rows || !Array.isArray(rows)) return;
+                for (const row of rows) {
+                  const name = row.display_name;
+                  const realm = row.realm || "Vol\x27Jin";
+                  const score = parseFloat(row.score || 0);
+                  const maxKey = parseInt(row.best_level || 0);
+
+                  if (name && score > 0) {
+                    if (!database[realm]) database[realm] = {};
+                    if (!database[realm][name] || database[realm][name].score < score) {
+                      database[realm][name] = { score, maxKey };
+                    }
                   }
                 }
               }
-            }
 
-            processRows(firstData.rows);
+              saveRows(firstData.rows);
 
-            // Scarica le pagine rimanenti
-            for (let p = 2; p <= totalPages; p++) {
-              try {
-                const res = await fetch(`https://coa.ascensionlogs.gg/api/rankings/mythic-plus/characters?realm=_all&bests=1&page=${p}&limit=100`, { headers });
-                if (res.ok) {
-                  const data = await res.json();
-                  processRows(data.rows);
+              // Scarica le restanti pagine in blocchi paralleli da 5 per massima velocità
+              for (let p = 2; p <= totalPages; p += 5) {
+                const batch = [];
+                for (let i = p; i < p + 5 && i <= totalPages; i++) {
+                  batch.push(
+                    fetch(`https://coa.ascensionlogs.gg/api/rankings/mythic-plus/characters?realm=_all&bests=1&page=${i}&limit=100`)
+                      .then(r => r.ok ? r.json() : null)
+                      .then(data => { if (data) saveRows(data.rows); })
+                      .catch(() => {})
+                  );
                 }
-                if (p % 10 === 0 || p === totalPages) {
-                  console.log(`Progresso: ${p}/${totalPages} pagine elaborate (${totalPlayers} personaggi caricati)`);
-                }
-              } catch (e) {
-                console.warn(`Errore a pagina ${p}: ${e.message}`);
+                await Promise.all(batch);
+                await new Promise(r => setTimeout(r, 100));
               }
-              // Piccola pausa per non saturare la connessione
-              await new Promise(r => setTimeout(r, 60));
-            }
 
-            console.log(`[3/3] Generazione file ScoreDB.lua (${totalPlayers} record)...`);
+              return database;
+            });
 
-            if (!database["Vol\x27Jin"]) database["Vol\x27Jin"] = {};
-            database["Vol\x27Jin"]["Giulio"] = { score: 2450.0, maxKey: 18 };
+            await browser.close();
+
+            console.log("[3/3] Generazione file ScoreDB.lua...");
+
+            if (!allPlayers["Vol\x27Jin"]) allPlayers["Vol\x27Jin"] = {};
+            allPlayers["Vol\x27Jin"]["Giulio"] = { score: 2450.0, maxKey: 18 };
 
             let lua = "-- AscensionScore Full Leaderboard Database\nAscensionScoreDB = {\n";
-            let written = 0;
-            for (let realm in database) {
+            let total = 0;
+            for (let realm in allPlayers) {
               lua += `    ["${realm}"] = {\n`;
-              for (let name in database[realm]) {
-                lua += `        ["${name}"] = { score = ${database[realm][name].score.toFixed(1)}, maxKey = ${database[realm][name].maxKey} },\n`;
-                written++;
+              for (let name in allPlayers[realm]) {
+                lua += `        ["${name}"] = { score = ${allPlayers[realm][name].score.toFixed(1)}, maxKey = ${allPlayers[realm][name].maxKey} },\n`;
+                total++;
               }
               lua += `    },\n`;
             }
             lua += "}\n";
 
             fs.writeFileSync("ScoreDB.lua", lua, "utf8");
-            console.log(`COMPLETATO: ${written} personaggi salvati con successo in ScoreDB.lua!`);
+            console.log(`OPERAZIONE COMPLETATA! ${total} personaggi salvati con successo in ScoreDB.lua.`);
           })();
           '
 
