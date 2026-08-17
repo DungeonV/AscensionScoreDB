@@ -7,7 +7,7 @@ TOTAL_PAGES = 104
 
 def scrape():
     database = {}
-    print(f"Avvio scansione di {TOTAL_PAGES} pagine...", flush=True)
+    print(f"Avvio scansione interattiva di {TOTAL_PAGES} pagine...", flush=True)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -19,23 +19,25 @@ def scrape():
         )
         page = context.new_page()
 
-        # Blocca elementi pesanti per velocizzare
+        # Blocca immagini e stili non necessari
         def block_assets(route):
-            if route.request.resource_type in ["image", "media", "font", "stylesheet"]:
+            if route.request.resource_type in ["image", "media", "font"]:
                 route.abort()
             else:
                 route.continue_()
         page.route("**/*", block_assets)
 
-        for page_num in range(1, TOTAL_PAGES + 1):
-            url = f"https://coa.ascensionlogs.gg/rankings/mythic-plus?realm=_all&page={page_num}"
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=15000)
-                page.wait_for_timeout(600)
+        # 1. Carica la prima pagina
+        page.goto("https://coa.ascensionlogs.gg/rankings/mythic-plus?realm=_all", wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(2000)
 
+        for page_num in range(1, TOTAL_PAGES + 1):
+            try:
+                # Estrai l'HTML attuale della tabella
                 html = page.content()
                 matches = re.finditer(r'/characters/([^/"\?]+)/([^/"\?]+)', html, re.IGNORECASE)
                 
+                count_page = 0
                 for m in matches:
                     raw_name, raw_realm = m.group(1), m.group(2)
                     name = urllib.parse.unquote(raw_name).strip()
@@ -58,22 +60,36 @@ def scrape():
 
                     if name not in database[realm] or database[realm][name]["score"] < score:
                         database[realm][name] = {"score": score, "maxKey": max_key}
+                        count_page += 1
 
-                if page_num % 10 == 0 or page_num == TOTAL_PAGES:
-                    current_total = sum(len(v) for v in database.values())
-                    print(f"Completata pagina {page_num}/{TOTAL_PAGES} (Totale PG: {current_total})", flush=True)
+                current_total = sum(len(v) for v in database.values())
+                print(f"[Pagina {page_num}/{TOTAL_PAGES}] Nuovi: +{count_page} | Totale PG: {current_total}", flush=True)
+
+                if page_num < TOTAL_PAGES:
+                    # Cerca e clicca sul pulsante Next / Pagina successiva nella paginazione
+                    next_button = page.locator("button:has-text('>'), [aria-label='Next page'], [aria-label='Go to next page'], button:has-text('Next')").last
+                    
+                    if next_button.is_visible():
+                        next_button.click()
+                        page.wait_for_timeout(800) # Attesa per consentire a React di ricaricare la lista
+                    else:
+                        # Fallback se non trova il pulsante: navigazione diretta
+                        next_url = f"https://coa.ascensionlogs.gg/rankings/mythic-plus?realm=_all&page={page_num + 1}"
+                        page.goto(next_url, wait_until="domcontentloaded", timeout=15000)
+                        page.wait_for_timeout(1000)
 
             except Exception as e:
                 print(f"Errore su pagina {page_num}: {e}", flush=True)
 
         browser.close()
 
+    # Fallback per Giulio
     if "Vol'Jin" not in database:
         database["Vol'Jin"] = {}
     database["Vol'Jin"]["Giulio"] = {"score": 2450.0, "maxKey": 18}
 
     total_chars = sum(len(v) for v in database.values())
-    print(f"Scrittura ScoreDB.lua con {total_chars} personaggi...", flush=True)
+    print(f"\nScrittura ScoreDB.lua con {total_chars} personaggi...", flush=True)
 
     with open("ScoreDB.lua", "w", encoding="utf-8") as f:
         f.write("-- AscensionScore Database generato automaticamente da GitHub Actions\n")
