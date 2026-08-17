@@ -2,9 +2,8 @@ name: Aggiorna Ascension Mythic+ Score
 
 on:
   schedule:
-    # Esegue in automatico ogni 6 ore
     - cron: '0 */6 * * *'
-  workflow_dispatch: # Permette di avviarlo a mano con un clic
+  workflow_dispatch:
 
 jobs:
   update-db:
@@ -20,7 +19,7 @@ jobs:
 
       - name: Installa dipendenze
         run: |
-          pip install playwright
+          pip install playwright playwright-stealth
           playwright install chromium
 
       - name: Esegui scraping Leaderboard
