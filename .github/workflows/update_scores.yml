@@ -2,8 +2,8 @@ name: Auto Update ScoreDB
 
 on:
   schedule:
-    - cron: '0 */4 * * *' # Si avvia automaticamente ogni 4 ore (al minuto 0)
-  workflow_dispatch:      # Ti permette di avviarlo manualmente con un clic se vuoi
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,6 +11,7 @@ permissions:
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -34,16 +35,34 @@ jobs:
 
           (async () => {
             const browser = await chromium.launch({ headless: true });
-            const page = await browser.newPage();
+            const context = await browser.newContext({
+              userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            });
+            const page = await context.newPage();
+
+            // Blocca richieste pesanti/pubblicità per velocizzare
+            await page.route("**/*", route => {
+              const url = route.request().url();
+              if (url.includes("google") || url.includes("adthrive") || url.includes("criteo") || url.includes("analytics") || url.includes("delivery")) {
+                return route.abort();
+              }
+              return route.continue();
+            });
+
+            console.log("Navigazione a pagina 1...");
+            await page.goto("https://coa.ascensionlogs.gg/rankings/mythic-plus?realm=_all", { waitUntil: "domcontentloaded", timeout: 60000 });
+            await page.waitForTimeout(3000);
+
             let database = {};
             const TOTAL_PAGES = 104;
 
             for (let p = 1; p <= TOTAL_PAGES; p++) {
-              await page.goto(`https://coa.ascensionlogs.gg/rankings/mythic-plus?realm=_all&page=${p}`, { waitUntil: "networkidle" });
-              
-              const data = await page.evaluate(() => {
-                const lines = document.body.innerText.split("\n").map(l => l.trim()).filter(l => l.length > 0);
-                let entries = [];
+              // Estrazione ricalcata sul parsing tabulare funzionante
+              const entries = await page.evaluate(() => {
+                const text = document.body.innerText;
+                const lines = text.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+                let items = [];
+
                 for (let i = 0; i < lines.length; i++) {
                   const match = lines[i].match(/\+(\d{1,2})\s*[\t\s]+(\d{3,4}(?:\.\d+)?)/);
                   if (match) {
@@ -51,26 +70,54 @@ jobs:
                     const score = parseFloat(match[2]);
                     let realm = "Vol'\''Jin";
                     let name = "";
+
                     for (let j = i - 1; j >= Math.max(0, i - 15); j--) {
                       const candidate = lines[j].replace(/\t/g, "").trim();
                       if (["Vol'\''Jin", "Area 52", "Elune", "Bleeding Hollow"].some(r => candidate.toLowerCase().includes(r.toLowerCase()))) {
                         realm = candidate;
                       }
-                      if (!name && /^[A-Za-z\u00C0-\u017F]{2,16}$/.test(candidate) && !["Rank", "Player", "Realm", "Score", "Runs", "Best", "Dungeons", "Classes", "Roles", "All"].includes(candidate) && !candidate.startsWith("#")) {
+                      if (!name && /^[A-Za-z\u00C0-\u017F]{2,16}$/.test(candidate) && 
+                          !["Rank", "Player", "Realm", "Score", "Runs", "Best", "Dungeons", "Classes", "Roles", "All"].includes(candidate) && 
+                          !candidate.startsWith("#")) {
                         name = candidate;
                       }
                     }
-                    if (name && score > 0) entries.push({ name, realm, score, maxKey });
+                    if (name && score > 0) {
+                      items.push({ name, realm, score, maxKey });
+                    }
                   }
                 }
-                return entries;
+                return items;
               });
 
-              data.forEach(item => {
+              entries.forEach(item => {
                 if (!database[item.realm]) database[item.realm] = {};
                 database[item.realm][item.name] = { score: item.score, maxKey: item.maxKey };
               });
-              console.log(`Pagina ${p} elaborata.`);
+
+              console.log(`[Pagina ${p}/${TOTAL_PAGES}] Trovati: +${entries.length}`);
+
+              if (p < TOTAL_PAGES) {
+                const clicked = await page.evaluate(() => {
+                  const buttons = Array.from(document.querySelectorAll("button, a, div[role=\"button\"]"));
+                  const nextBtn = buttons.reverse().find(el => {
+                    const txt = el.innerText.trim();
+                    const aria = (el.getAttribute("aria-label") || "").toLowerCase();
+                    return (txt === ">" || txt.toLowerCase().includes("next") || aria.includes("next")) && !el.disabled;
+                  });
+                  if (nextBtn) {
+                    nextBtn.click();
+                    return true;
+                  }
+                  return false;
+                });
+
+                if (!clicked) {
+                  console.log("Pulsante Next non trovato, procedo con URL diretto.");
+                  await page.goto(`https://coa.ascensionlogs.gg/rankings/mythic-plus?realm=_all&page=${p + 1}`, { waitUntil: "domcontentloaded", timeout: 30000 });
+                }
+                await page.waitForTimeout(1500);
+              }
             }
 
             await browser.close();
@@ -79,16 +126,19 @@ jobs:
             database["Vol'\''Jin"]["Giulio"] = { score: 2450.0, maxKey: 18 };
 
             let lua = "-- AscensionScore Full Leaderboard Database\nAscensionScoreDB = {\n";
+            let total = 0;
             for (let realm in database) {
               lua += `    ["${realm}"] = {\n`;
               for (let name in database[realm]) {
                 lua += `        ["${name}"] = { score = ${database[realm][name].score.toFixed(1)}, maxKey = ${database[realm][name].maxKey} },\n`;
+                total++;
               }
               lua += `    },\n`;
             }
             lua += "}\n";
 
             fs.writeFileSync("ScoreDB.lua", lua, "utf8");
+            console.log(`Completato con successo: ${total} personaggi salvati in ScoreDB.lua`);
           })();
           '
 
