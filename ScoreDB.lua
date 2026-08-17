@@ -1,1 +1,3 @@
-Content di test di essem
+
+AscensionScoreLogs = {
+}
