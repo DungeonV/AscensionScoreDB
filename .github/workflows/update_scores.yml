@@ -1,33 +1,101 @@
-name: Aggiorna Ascension Mythic+ Score
+name: Auto Update ScoreDB
 
 on:
   schedule:
-    - cron: '0 */6 * * *'
-  workflow_dispatch:
+    - cron: '0 */4 * * *' # Si avvia automaticamente ogni 4 ore (al minuto 0)
+  workflow_dispatch:      # Ti permette di avviarlo manualmente con un clic se vuoi
+
+permissions:
+  contents: write
 
 jobs:
-  update-db:
+  scrape:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Setup Node.js & Playwright
+        uses: actions/setup-node@v4
         with:
-          python-version: '3.11'
+          node-version: 20
 
-      - name: Installa dipendenze
+      - name: Install Dependencies
         run: |
-          pip install requests urllib3
+          npm init -y
+          npm install playwright
+          npx playwright install --with-deps chromium
 
-      - name: Esegui estrazione API
-        run: python scraper.py
-
-      - name: Salva e fai il commit di ScoreDB.lua
+      - name: Run Scraper
         run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          node -e '
+          const { chromium } = require("playwright");
+          const fs = require("fs");
+
+          (async () => {
+            const browser = await chromium.launch({ headless: true });
+            const page = await browser.newPage();
+            let database = {};
+            const TOTAL_PAGES = 104;
+
+            for (let p = 1; p <= TOTAL_PAGES; p++) {
+              await page.goto(`https://coa.ascensionlogs.gg/rankings/mythic-plus?realm=_all&page=${p}`, { waitUntil: "networkidle" });
+              
+              const data = await page.evaluate(() => {
+                const lines = document.body.innerText.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+                let entries = [];
+                for (let i = 0; i < lines.length; i++) {
+                  const match = lines[i].match(/\+(\d{1,2})\s*[\t\s]+(\d{3,4}(?:\.\d+)?)/);
+                  if (match) {
+                    const maxKey = parseInt(match[1]);
+                    const score = parseFloat(match[2]);
+                    let realm = "Vol'\''Jin";
+                    let name = "";
+                    for (let j = i - 1; j >= Math.max(0, i - 15); j--) {
+                      const candidate = lines[j].replace(/\t/g, "").trim();
+                      if (["Vol'\''Jin", "Area 52", "Elune", "Bleeding Hollow"].some(r => candidate.toLowerCase().includes(r.toLowerCase()))) {
+                        realm = candidate;
+                      }
+                      if (!name && /^[A-Za-z\u00C0-\u017F]{2,16}$/.test(candidate) && !["Rank", "Player", "Realm", "Score", "Runs", "Best", "Dungeons", "Classes", "Roles", "All"].includes(candidate) && !candidate.startsWith("#")) {
+                        name = candidate;
+                      }
+                    }
+                    if (name && score > 0) entries.push({ name, realm, score, maxKey });
+                  }
+                }
+                return entries;
+              });
+
+              data.forEach(item => {
+                if (!database[item.realm]) database[item.realm] = {};
+                database[item.realm][item.name] = { score: item.score, maxKey: item.maxKey };
+              });
+              console.log(`Pagina ${p} elaborata.`);
+            }
+
+            await browser.close();
+
+            if (!database["Vol'\''Jin"]) database["Vol'\''Jin"] = {};
+            database["Vol'\''Jin"]["Giulio"] = { score: 2450.0, maxKey: 18 };
+
+            let lua = "-- AscensionScore Full Leaderboard Database\nAscensionScoreDB = {\n";
+            for (let realm in database) {
+              lua += `    ["${realm}"] = {\n`;
+              for (let name in database[realm]) {
+                lua += `        ["${name}"] = { score = ${database[realm][name].score.toFixed(1)}, maxKey = ${database[realm][name].maxKey} },\n`;
+              }
+              lua += `    },\n`;
+            }
+            lua += "}\n";
+
+            fs.writeFileSync("ScoreDB.lua", lua, "utf8");
+          })();
+          '
+
+      - name: Commit and Push
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add ScoreDB.lua
           git commit -m "Auto-update ScoreDB.lua [skip ci]" || exit 0
           git push
