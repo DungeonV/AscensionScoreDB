@@ -11,7 +11,7 @@ permissions:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -34,31 +34,36 @@ jobs:
           const fs = require("fs");
 
           (async () => {
-            const browser = await chromium.launch({ headless: true });
+            const browser = await chromium.launch({ 
+              headless: true,
+              args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+            });
             const context = await browser.newContext({
+              viewport: { width: 1920, height: 1080 },
               userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             });
             const page = await context.newPage();
 
-            // Blocca richieste pesanti/pubblicità per velocizzare
+            // Blocca tracker e annunci pesanti per velocizzare al massimo l esecuzione
             await page.route("**/*", route => {
               const url = route.request().url();
-              if (url.includes("google") || url.includes("adthrive") || url.includes("criteo") || url.includes("analytics") || url.includes("delivery")) {
+              if (url.includes("google") || url.includes("adthrive") || url.includes("criteo") || url.includes("analytics") || url.includes("delivery") || url.includes("fonts")) {
                 return route.abort();
               }
               return route.continue();
             });
 
-            console.log("Navigazione a pagina 1...");
+            console.log("Connessione iniziale alla classifica...");
             await page.goto("https://coa.ascensionlogs.gg/rankings/mythic-plus?realm=_all", { waitUntil: "domcontentloaded", timeout: 60000 });
-            await page.waitForTimeout(3000);
+            await page.waitForTimeout(4000);
 
             let database = {};
             const TOTAL_PAGES = 104;
+            let lastFirstRow = "";
 
             for (let p = 1; p <= TOTAL_PAGES; p++) {
-              // Estrazione ricalcata sul parsing tabulare funzionante
-              const entries = await page.evaluate(() => {
+              // Estrazione dei dati dalla schermata corrente
+              const result = await page.evaluate(() => {
                 const text = document.body.innerText;
                 const lines = text.split("\n").map(l => l.trim()).filter(l => l.length > 0);
                 let items = [];
@@ -87,36 +92,72 @@ jobs:
                     }
                   }
                 }
-                return items;
+                const firstPlayer = items.length > 0 ? items[0].name : "";
+                return { items, firstPlayer };
               });
 
-              entries.forEach(item => {
+              result.items.forEach(item => {
                 if (!database[item.realm]) database[item.realm] = {};
                 database[item.realm][item.name] = { score: item.score, maxKey: item.maxKey };
               });
 
-              console.log(`[Pagina ${p}/${TOTAL_PAGES}] Trovati: +${entries.length}`);
+              lastFirstRow = result.firstPlayer;
+              const totalUnique = Object.values(database).reduce((a, r) => a + Object.keys(r).length, 0);
+              console.log(`[Pagina ${p}/${TOTAL_PAGES}] Trovati: +${result.items.length} | Totale nel DB: ${totalUnique}`);
 
               if (p < TOTAL_PAGES) {
-                const clicked = await page.evaluate(() => {
-                  const buttons = Array.from(document.querySelectorAll("button, a, div[role=\"button\"]"));
-                  const nextBtn = buttons.reverse().find(el => {
-                    const txt = el.innerText.trim();
-                    const aria = (el.getAttribute("aria-label") || "").toLowerCase();
-                    return (txt === ">" || txt.toLowerCase().includes("next") || aria.includes("next")) && !el.disabled;
-                  });
-                  if (nextBtn) {
-                    nextBtn.click();
+                let moved = false;
+
+                // 1. Clic sul numero esatto della pagina successiva
+                const nextPageNum = p + 1;
+                const pageClicked = await page.evaluate((targetPage) => {
+                  const elements = Array.from(document.querySelectorAll("button, a, div[role=\"button\"], span"));
+                  const target = elements.find(el => el.innerText.trim() === String(targetPage));
+                  if (target) {
+                    target.click();
                     return true;
                   }
                   return false;
-                });
+                }, nextPageNum);
 
-                if (!clicked) {
-                  console.log("Pulsante Next non trovato, procedo con URL diretto.");
-                  await page.goto(`https://coa.ascensionlogs.gg/rankings/mythic-plus?realm=_all&page=${p + 1}`, { waitUntil: "domcontentloaded", timeout: 30000 });
+                if (pageClicked) {
+                  moved = true;
+                } else {
+                  // 2. Fallback: Clicca sulla freccia avanti (>)
+                  const nextClicked = await page.evaluate(() => {
+                    const elements = Array.from(document.querySelectorAll("button, a, div[role=\"button\"]"));
+                    const arrow = elements.reverse().find(el => {
+                      const txt = el.innerText.trim();
+                      const aria = (el.getAttribute("aria-label") || "").toLowerCase();
+                      return (txt === ">" || txt.includes("Next") || aria.includes("next")) && !el.disabled;
+                    });
+                    if (arrow) {
+                      arrow.click();
+                      return true;
+                    }
+                    return false;
+                  });
+                  if (nextClicked) moved = true;
                 }
-                await page.waitForTimeout(1500);
+
+                if (moved) {
+                  // Attende attivamente che la tabella si aggiorni con i nuovi dati
+                  let reloads = 0;
+                  while (reloads < 15) {
+                    await page.waitForTimeout(500);
+                    const currentFirst = await page.evaluate(() => {
+                      const match = document.body.innerText.match(/\+(\d{1,2})\s*[\t\s]+(\d{3,4}(?:\.\d+)?)/);
+                      return match ? match.input.slice(0, 80) : "";
+                    });
+                    if (currentFirst !== lastFirstRow) break;
+                    reloads++;
+                  }
+                } else {
+                  // 3. Fallback URL
+                  console.log(`Paginazione UI non trovata, carico pagina ${p + 1} direttamente.`);
+                  await page.goto(`https://coa.ascensionlogs.gg/rankings/mythic-plus?realm=_all&page=${p + 1}`, { waitUntil: "domcontentloaded", timeout: 30000 });
+                  await page.waitForTimeout(2500);
+                }
               }
             }
 
@@ -126,19 +167,19 @@ jobs:
             database["Vol'\''Jin"]["Giulio"] = { score: 2450.0, maxKey: 18 };
 
             let lua = "-- AscensionScore Full Leaderboard Database\nAscensionScoreDB = {\n";
-            let total = 0;
+            let totalCount = 0;
             for (let realm in database) {
               lua += `    ["${realm}"] = {\n`;
               for (let name in database[realm]) {
                 lua += `        ["${name}"] = { score = ${database[realm][name].score.toFixed(1)}, maxKey = ${database[realm][name].maxKey} },\n`;
-                total++;
+                totalCount++;
               }
               lua += `    },\n`;
             }
             lua += "}\n";
 
             fs.writeFileSync("ScoreDB.lua", lua, "utf8");
-            console.log(`Completato con successo: ${total} personaggi salvati in ScoreDB.lua`);
+            console.log(`ESTRAZIONE TERMINATA! ${totalCount} personaggi salvati con successo in ScoreDB.lua.`);
           })();
           '
 
