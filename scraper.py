@@ -2,37 +2,51 @@ import os
 import re
 import urllib.parse
 from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync
 
 TOTAL_PAGES = 104
 
 def scrape():
     database = {}
-    print(f"Avvio scansione stealth di {TOTAL_PAGES} pagine...", flush=True)
+    print(f"Avvio scansione di {TOTAL_PAGES} pagine...", flush=True)
 
     with sync_playwright() as p:
+        # Configurazione browser headless con flag native anti-detection
         browser = p.chromium.launch(
             headless=True,
             args=[
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled"
+                "--disable-blink-features=AutomationControlled",
             ]
         )
+
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            viewport={"width": 1920, "height": 1080}
+            viewport={"width": 1920, "height": 1080},
+            locale="en-US"
         )
 
         page = context.new_page()
-        stealth_sync(page)
+
+        # Iniezione script per mascherare l'automazione
+        page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        """)
+
+        # Blocca immagini e font per massima reattività
+        def block_heavy_assets(route):
+            if route.request.resource_type in ["image", "media", "font"]:
+                route.abort()
+            else:
+                route.continue_()
+        page.route("**/*", block_heavy_assets)
 
         for page_num in range(1, TOTAL_PAGES + 1):
             url = f"https://coa.ascensionlogs.gg/rankings/mythic-plus?realm=_all&page={page_num}"
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(1200)
+                page.wait_for_timeout(1000)
 
                 html = page.content()
                 matches = list(re.finditer(r'/characters/([^/"\?]+)/([^/"\?]+)', html, re.IGNORECASE))
@@ -64,13 +78,14 @@ def scrape():
 
                 current_total = sum(len(v) for v in database.values())
                 if page_num % 10 == 0 or page_num == TOTAL_PAGES:
-                    print(f"Progresso: {page_num}/{TOTAL_PAGES} pagine (Totale: {current_total} PG)", flush=True)
+                    print(f"Progresso: {page_num}/{TOTAL_PAGES} pagine completate (Totale: {current_total} PG)", flush=True)
 
             except Exception as e:
-                print(f"Avviso pagina {page_num}: {e}", flush=True)
+                print(f"Avviso su pagina {page_num}: {e}", flush=True)
 
         browser.close()
 
+    # Fallback per Giulio
     if "Vol'Jin" not in database:
         database["Vol'Jin"] = {}
     database["Vol'Jin"]["Giulio"] = {"score": 2450.0, "maxKey": 18}
