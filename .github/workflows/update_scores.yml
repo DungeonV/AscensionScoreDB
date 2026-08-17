@@ -19,10 +19,9 @@ jobs:
 
       - name: Installa dipendenze
         run: |
-          pip install playwright
-          playwright install chromium
+          pip install requests urllib3
 
-      - name: Esegui scraping Leaderboard
+      - name: Esegui estrazione API
         run: python scraper.py
 
       - name: Salva e fai il commit di ScoreDB.lua
