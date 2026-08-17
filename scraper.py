@@ -7,10 +7,9 @@ TOTAL_PAGES = 104
 
 def scrape():
     database = {}
-    print(f"Avvio scansione di {TOTAL_PAGES} pagine...", flush=True)
+    print(f"Avvio scansione progressiva reale di {TOTAL_PAGES} pagine...", flush=True)
 
     with sync_playwright() as p:
-        # Configurazione browser headless con flag native anti-detection
         browser = p.chromium.launch(
             headless=True,
             args=[
@@ -23,34 +22,44 @@ def scrape():
 
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            viewport={"width": 1920, "height": 1080},
-            locale="en-US"
+            viewport={"width": 1920, "height": 1080}
         )
 
         page = context.new_page()
 
-        # Iniezione script per mascherare l'automazione
-        page.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        """)
+        # Disattiva automazioni visibili
+        page.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
 
-        # Blocca immagini e font per massima reattività
-        def block_heavy_assets(route):
-            if route.request.resource_type in ["image", "media", "font"]:
-                route.abort()
-            else:
-                route.continue_()
-        page.route("**/*", block_heavy_assets)
+        # 1. Carica pagina iniziale
+        page.goto("https://coa.ascensionlogs.gg/rankings/mythic-plus?realm=_all&page=1", wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(2000)
+
+        last_top_character = ""
 
         for page_num in range(1, TOTAL_PAGES + 1):
             url = f"https://coa.ascensionlogs.gg/rankings/mythic-plus?realm=_all&page={page_num}"
+            
             try:
-                page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(1000)
+                if page_num > 1:
+                    page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                    
+                    # Attende finché il primo PG a schermo non è diverso da quello della pagina precedente
+                    for _ in range(20):
+                        html_check = page.content()
+                        first_match = re.search(r'/characters/([^/"\?]+)/([^/"\?]+)', html_check, re.IGNORECASE)
+                        current_top = first_match.group(1) if first_match else ""
+                        
+                        if current_top and current_top != last_top_character:
+                            break
+                        page.wait_for_timeout(300)
 
+                # Estrazione dati della pagina corrente
                 html = page.content()
                 matches = list(re.finditer(r'/characters/([^/"\?]+)/([^/"\?]+)', html, re.IGNORECASE))
                 
+                if matches:
+                    last_top_character = matches[0].group(1)
+
                 count_page = 0
                 for m in matches:
                     raw_name, raw_realm = m.group(1), m.group(2)
@@ -77,11 +86,10 @@ def scrape():
                         count_page += 1
 
                 current_total = sum(len(v) for v in database.values())
-                if page_num % 10 == 0 or page_num == TOTAL_PAGES:
-                    print(f"Progresso: {page_num}/{TOTAL_PAGES} pagine completate (Totale: {current_total} PG)", flush=True)
+                print(f"[Pagina {page_num:03d}/{TOTAL_PAGES}] Nuovi: +{count_page} | Totale PG: {current_total}", flush=True)
 
             except Exception as e:
-                print(f"Avviso su pagina {page_num}: {e}", flush=True)
+                print(f"Errore su pagina {page_num}: {e}", flush=True)
 
         browser.close()
 
