@@ -7,35 +7,37 @@ TOTAL_PAGES = 104
 
 def scrape():
     database = {}
-    print(f"Avvio scansione interattiva di {TOTAL_PAGES} pagine...", flush=True)
+    print(f"Avvio scansione reale di {TOTAL_PAGES} pagine...", flush=True)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
         )
+        # Creiamo un contesto senza cache per evitare che Next.js riutilizzi la pagina 1
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            bypass_csp=True
         )
-        page = context.new_page()
 
-        # Blocca immagini e stili non necessari
-        def block_assets(route):
-            if route.request.resource_type in ["image", "media", "font"]:
-                route.abort()
-            else:
-                route.continue_()
-        page.route("**/*", block_assets)
-
-        # 1. Carica la prima pagina
-        page.goto("https://coa.ascensionlogs.gg/rankings/mythic-plus?realm=_all", wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(2000)
+        last_first_player = ""
 
         for page_num in range(1, TOTAL_PAGES + 1):
+            page = context.new_page()
+            url = f"https://coa.ascensionlogs.gg/rankings/mythic-plus?realm=_all&page={page_num}"
+
             try:
-                # Estrai l'HTML attuale della tabella
+                # Carica la pagina
+                page.goto(url, wait_until="load", timeout=30000)
+                
+                # Attende che sia presente almeno un link a un personaggio
+                page.wait_for_selector('a[href*="/characters/"]', timeout=15000)
+                
+                # Breve pausa per assicurare il popolamento del punteggio
+                page.wait_for_timeout(800)
+
                 html = page.content()
-                matches = re.finditer(r'/characters/([^/"\?]+)/([^/"\?]+)', html, re.IGNORECASE)
+                matches = list(re.finditer(r'/characters/([^/"\?]+)/([^/"\?]+)', html, re.IGNORECASE))
                 
                 count_page = 0
                 for m in matches:
@@ -65,21 +67,10 @@ def scrape():
                 current_total = sum(len(v) for v in database.values())
                 print(f"[Pagina {page_num}/{TOTAL_PAGES}] Nuovi: +{count_page} | Totale PG: {current_total}", flush=True)
 
-                if page_num < TOTAL_PAGES:
-                    # Cerca e clicca sul pulsante Next / Pagina successiva nella paginazione
-                    next_button = page.locator("button:has-text('>'), [aria-label='Next page'], [aria-label='Go to next page'], button:has-text('Next')").last
-                    
-                    if next_button.is_visible():
-                        next_button.click()
-                        page.wait_for_timeout(800) # Attesa per consentire a React di ricaricare la lista
-                    else:
-                        # Fallback se non trova il pulsante: navigazione diretta
-                        next_url = f"https://coa.ascensionlogs.gg/rankings/mythic-plus?realm=_all&page={page_num + 1}"
-                        page.goto(next_url, wait_until="domcontentloaded", timeout=15000)
-                        page.wait_for_timeout(1000)
-
             except Exception as e:
                 print(f"Errore su pagina {page_num}: {e}", flush=True)
+            finally:
+                page.close()
 
         browser.close()
 
