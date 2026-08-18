@@ -1,7 +1,5 @@
--- AscensionScore Full Leaderboard Database
--- Questo file funge da base di partenza per la classifica globale
 AscensionScoreDB = {
-    ["Vol'Jin"] = {
+    ["Vol'jin - Conquest of Azeroth"] = {
         ["Shannax"] = { score = 2226.0, maxKey = 31 },
         ["Partagx"] = { score = 2033.2, maxKey = 31 },
         ["Bleachtini"] = { score = 2026.7, maxKey = 24 },
@@ -535,7 +533,7 @@ AscensionScoreDB = {
         ["Molnet"] = { score = 804.5, maxKey = 14 },
         ["Luckasy"] = { score = 804.3, maxKey = 16 },
         ["Ignniis"] = { score = 804.3, maxKey = 14 },
-        ["Giulio"] = { score = 2450.0, maxKey = 18 },
+        ["Giulio"] = { score = 807.64, maxKey = 18 },
         ["Sephose"] = { score = 802.7, maxKey = 13 },
         ["Bloodjunkie"] = { score = 802.6, maxKey = 12 },
         ["Sunclear"] = { score = 802.6, maxKey = 13 },
@@ -2625,4 +2623,10 @@ AscensionScoreDB = {
         ["Plaguexxl"] = { score = 321.1, maxKey = 13 },
         ["Dentatu"] = { score = 321.1, maxKey = 11 },
         ["Mivas"] = { score = 320.9, maxKey = 10 },
-        ["Yodoc"] = { score = 320.9, maxKey = 10 },
+        ["Yodoc"] = { score = 320.9, maxKey = 10 },        
+        ["Eyeriipper"] = { score = 320.9, maxKey = 10 },
+        ["Gerdv"] = { score = 320.9, maxKey = 11 },
+        ["Pirapika"] = { score = 320.8, maxKey = 8 },
+        ["Mbape"] = { score = 320.0, maxKey = 10 },
+    },
+}
